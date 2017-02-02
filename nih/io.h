@@ -26,6 +26,9 @@
 #include <nih/macros.h>
 #include <nih/list.h>
 
+#define POLLIN_SET (POLLRDNORM | POLLRDBAND | POLLIN | POLLHUP | POLLERR)
+#define POLLOUT_SET (POLLWRBAND | POLLWRNORM | POLLOUT | POLLERR)
+#define POLLEX_SET (POLLPRI)
 
 /**
  * NihIoType:
@@ -270,6 +273,10 @@ NihIoWatch *  nih_io_add_watch           (const void *parent, int fd,
 					  NihIoEvents events,
 					  NihIoWatcher watcher, void *data)
 	__attribute__ ((warn_unused_result, malloc));
+
+struct pollfd;
+void          nih_io_get_poll_fds	 (int *nfds, struct pollfd *fds);
+void          nih_io_handle_poll_fds	 (int nfds, struct pollfd *fds);
 
 void          nih_io_select_fds          (int *nfds, fd_set *readfds,
 					  fd_set *writefds, fd_set *exceptfds);

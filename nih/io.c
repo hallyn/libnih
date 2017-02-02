@@ -25,6 +25,7 @@
 
 
 #include <sys/types.h>
+#include <sys/poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -72,7 +73,6 @@ static NihIoMessage * nih_io_first_message  (NihIo *io);
  * structure.
  **/
 NihList *nih_io_watches = NULL;
-
 
 /**
  * nih_io_init:
@@ -145,6 +145,50 @@ nih_io_add_watch (const void   *parent,
 	return watch;
 }
 
+/**
+ * nih_io_get_poll_fds:
+ * @nfds: size of @fds in, number of fds returned out
+ * @fds: array of pollfd to be filled in
+ *
+ * Fills the given pollfd array based on the list of I/O watches.
+ **/
+void
+nih_io_get_poll_fds(int *nfds, struct pollfd *fds)
+{
+	int i = 0;
+
+	nih_io_init ();
+
+	NIH_LIST_FOREACH (nih_io_watches, iter) {
+		NihIoWatch    *watch = (NihIoWatch *)iter;
+		int newi = i;
+
+		if (i >= *nfds)
+			break;
+
+		fds[i].fd = watch->fd;
+		fds[i].events = 0;
+		fds[i].revents = -1;
+
+		if (watch->events & NIH_IO_READ) {
+			fds[i].events = POLLIN_SET;
+			newi = i + 1;
+		}
+
+		if (watch->events & NIH_IO_WRITE) {
+			fds[i].events |= POLLOUT_SET;
+			newi = i + 1;
+		}
+
+		if (watch->events & NIH_IO_EXCEPT) {
+			fds[i].events |= POLLEX_SET;
+			newi = i + 1;
+		}
+		i = newi;
+	}
+
+	*nfds = i;
+}
 
 /**
  * nih_io_select_fds:
@@ -190,6 +234,62 @@ nih_io_select_fds (int    *nfds,
 
 	/* Re-check in case we exceeded the limit in the loop */
 	nih_assert (*nfds <= FD_SETSIZE);
+}
+
+NihIoEvents get_poll_activity(NihIoEvents e, int polle)
+{
+	NihIoEvents ret = NIH_IO_NONE;
+
+	if (e & NIH_IO_READ) {
+		if (polle & POLLIN_SET)
+			ret |= NIH_IO_READ;
+	}
+	if (e & NIH_IO_WRITE) {
+		if (polle & POLLOUT_SET)
+			ret |= NIH_IO_WRITE;
+	}
+	if (e & NIH_IO_EXCEPT) {
+		if (polle & POLLEX_SET)
+			ret |= NIH_IO_EXCEPT;
+	}
+
+	return ret;
+}
+
+/**
+ * nih_io_handle_poll_fds:
+ * @nfds: number of events
+ * @fds: poll descriptors for available fds
+ *
+ * Receives array of poll structures which have active changes.
+ * and iterates the watch list calling the appropriate functions.
+ *
+ * It is safe for watches to remove the watch during their call.
+ **/
+void
+nih_io_handle_poll_fds (int nfds, struct pollfd *fds)
+{
+	nih_assert (fds != NULL);
+
+	nih_io_init ();
+
+	NIH_LIST_FOREACH_SAFE (nih_io_watches, iter) {
+		NihIoWatch  *watch = (NihIoWatch *)iter;
+		NihIoEvents  events;
+		int i;
+
+		events = NIH_IO_NONE;
+
+		for (i = 0; i < nfds; i++) {
+			if (fds[i].fd == watch->fd) {
+				events = get_poll_activity(watch->events, fds[i].revents);
+				break;
+			}
+		}
+
+		if (events)
+			watch->watcher (watch->data, watch, events);
+	}
 }
 
 /**

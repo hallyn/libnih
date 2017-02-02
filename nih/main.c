@@ -27,6 +27,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/select.h>
+#include <sys/poll.h>
 
 #include <time.h>
 #include <fcntl.h>
@@ -130,7 +131,7 @@ static char *pid_file = NULL;
 /**
  * interrupt_pipe:
  *
- * Pipe used for interrupting an active select() call in case a signal
+ * Pipe used for interrupting an active poll() call in case a signal
  * comes in between the last time we handled the signal and the time we
  * ran the call.
  **/
@@ -545,45 +546,45 @@ nih_main_loop (void)
 	while (! exit_loop) {
 		NihTimer       *next_timer;
 		struct timespec now;
-		struct timeval  timeout;
-		fd_set          readfds, writefds, exceptfds;
 		char            buf[1];
-		int             nfds, ret;
+		int		nfds;
+		struct pollfd   fds[128];
+		int		timeout_ms = -1;
 
 		/* Use the due time of the next timer to calculate how long
-		 * to spend in select().  That way we don't sleep for any
+		 * to spend in poll().  That way we don't sleep for any
 		 * less or more time than we need to.
 		 */
 		next_timer = nih_timer_next_due ();
 		if (next_timer) {
 			nih_assert (clock_gettime (CLOCK_MONOTONIC, &now) == 0);
 
-			timeout.tv_sec = next_timer->due - now.tv_sec;
-			timeout.tv_usec = 0;
+			timeout_ms = next_timer->due - now.tv_sec;
+			timeout_ms *= 1000;
 		}
 
-		/* Start off with empty watch lists */
-		FD_ZERO (&readfds);
-		FD_ZERO (&writefds);
-		FD_ZERO (&exceptfds);
+		/* And look for changes in anything we're watching */
+		nfds = 127;
+		nih_io_get_poll_fds (&nfds, fds);
 
 		/* Always look for changes in the interrupt pipe */
-		FD_SET (interrupt_pipe[0], &readfds);
-		nfds = interrupt_pipe[0] + 1;
+		fds[nfds].fd = interrupt_pipe[0];
+		fds[nfds].events = POLLIN_SET;
+		nfds++;
 
-		/* And look for changes in anything we're watching */
-		nih_io_select_fds (&nfds, &readfds, &writefds, &exceptfds);
 
 		/* Now we hang around until either a signal comes in (and
 		 * calls nih_main_loop_interrupt), a file descriptor we're
 		 * watching changes in some way or it's time to run a timer.
 		 */
-		ret = select (nfds, &readfds, &writefds, &exceptfds,
-			      (next_timer ? &timeout : NULL));
+		nfds = poll(fds, nfds, timeout_ms);
+
+		if (nfds < 0)
+			nih_error("Error during poll: %m");
 
 		/* Deal with events */
-		if (ret > 0)
-			nih_io_handle_fds (&readfds, &writefds, &exceptfds);
+		if (nfds > 0)
+			nih_io_handle_poll_fds (nfds, fds);
 
 		/* Deal with signals.
 		 *
