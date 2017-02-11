@@ -28,6 +28,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/epoll.h>
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -62,7 +63,6 @@ static void           nih_io_closed         (NihIo *io);
 static void           nih_io_error          (NihIo *io);
 static void           nih_io_shutdown_check (NihIo *io);
 static NihIoMessage * nih_io_first_message  (NihIo *io);
-
 
 /**
  * nih_io_watches;
@@ -145,6 +145,40 @@ nih_io_add_watch (const void   *parent,
 	return watch;
 }
 
+/**
+ * nih_io_setup_epoll_fds:
+ * @epfd: valid epoll fd
+ *
+ * Attaches watches to the epfd based on the list of I/O watches.
+ **/
+void
+nih_io_setup_epoll_fds (int epfd)
+{
+	struct epoll_event ev;
+
+	nih_io_init ();
+
+	NIH_LIST_FOREACH (nih_io_watches, iter) {
+		NihIoWatch    *watch = (NihIoWatch *)iter;
+
+		memset(&ev, 0, sizeof(ev));
+
+		if (watch->events & NIH_IO_READ)
+			ev.events |= POLLIN_SET;
+
+		if (watch->events & NIH_IO_WRITE)
+			ev.events |= POLLOUT_SET;
+
+		if (watch->events & NIH_IO_EXCEPT)
+			ev.events |= POLLEX_SET;
+
+		if (ev.events) {
+			ev.data.fd = watch->fd;
+			if (epoll_ctl(epfd, EPOLL_CTL_ADD, watch->fd, &ev) < 0)
+				nih_error("Failed to add fd to epoll set");
+		}
+	}
+}
 
 /**
  * nih_io_select_fds:
@@ -190,6 +224,55 @@ nih_io_select_fds (int    *nfds,
 
 	/* Re-check in case we exceeded the limit in the loop */
 	nih_assert (*nfds <= FD_SETSIZE);
+}
+
+static NihIoEvents
+ev_bits_set(int nfds, struct epoll_event *ev, int fd, NihIoEvents ioe)
+{
+	struct epoll_event *ep;
+	NihIoEvents events = NIH_IO_NONE;
+	int i;
+
+	for (i = 0, ep = ev; i < nfds; i++, ep++) {
+		if (ep->data.fd != fd)
+			continue;
+		if ((ioe & NIH_IO_READ ) && (ep->events & POLLIN_SET))
+			events |= NIH_IO_READ;
+		if ((ioe & NIH_IO_WRITE ) && (ep->events & POLLOUT_SET))
+			events |= NIH_IO_WRITE;
+		if ((ioe & NIH_IO_EXCEPT ) && (ep->events & POLLEX_SET))
+			events |= NIH_IO_EXCEPT;
+	}
+
+	return events;
+}
+
+/**
+ * nih_io_handle_epoll_fds:
+ * @nfds: number of events
+ * @events: pointer to an array of epoll events
+ *
+ * Receives array of epoll event structures which have active changes.
+ * and iterates the watch list calling the appropriate functions.
+ *
+ * It is safe for watches to remove the watch during their call.
+ **/
+void
+nih_io_handle_epoll_fds (int nfds, struct epoll_event *ev)
+{
+	nih_assert (ev != NULL);
+
+	nih_io_init ();
+
+	NIH_LIST_FOREACH_SAFE (nih_io_watches, iter) {
+		NihIoWatch  *watch = (NihIoWatch *)iter;
+		NihIoEvents  events;
+
+		events = ev_bits_set(nfds, ev, watch->fd, watch->events);
+
+		if (events)
+			watch->watcher (watch->data, watch, events);
+	}
 }
 
 /**

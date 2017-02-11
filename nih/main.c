@@ -26,7 +26,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/select.h>
+#include <sys/epoll.h>
 
 #include <time.h>
 #include <fcntl.h>
@@ -130,7 +130,7 @@ static char *pid_file = NULL;
 /**
  * interrupt_pipe:
  *
- * Pipe used for interrupting an active select() call in case a signal
+ * Pipe used for interrupting an active epoll() call in case a signal
  * comes in between the last time we handled the signal and the time we
  * ran the call.
  **/
@@ -545,45 +545,47 @@ nih_main_loop (void)
 	while (! exit_loop) {
 		NihTimer       *next_timer;
 		struct timespec now;
-		struct timeval  timeout;
-		fd_set          readfds, writefds, exceptfds;
 		char            buf[1];
-		int             nfds, ret;
+		int             nfds;
+		int		epfd;
+		struct epoll_event ev, evs[1024];
+		int		timeout_ms = -1;
+
+		epfd = epoll_create (1);
+		nih_assert (epfd >= 0);
 
 		/* Use the due time of the next timer to calculate how long
-		 * to spend in select().  That way we don't sleep for any
+		 * to spend in epoll().  That way we don't sleep for any
 		 * less or more time than we need to.
 		 */
 		next_timer = nih_timer_next_due ();
 		if (next_timer) {
 			nih_assert (clock_gettime (CLOCK_MONOTONIC, &now) == 0);
 
-			timeout.tv_sec = next_timer->due - now.tv_sec;
-			timeout.tv_usec = 0;
+			timeout_ms = next_timer->due - now.tv_sec;
+			timeout_ms *= 1000;
 		}
 
-		/* Start off with empty watch lists */
-		FD_ZERO (&readfds);
-		FD_ZERO (&writefds);
-		FD_ZERO (&exceptfds);
-
 		/* Always look for changes in the interrupt pipe */
-		FD_SET (interrupt_pipe[0], &readfds);
-		nfds = interrupt_pipe[0] + 1;
+		ev.events = POLLIN_SET;
+		ev.data.fd = interrupt_pipe[0];
+		if (epoll_ctl(epfd, EPOLL_CTL_ADD, interrupt_pipe[0], &ev) < 0) {
+			nih_error("failed adding interrupt pipe to epoll set: %m");
+			nih_assert(0);
+		}
 
 		/* And look for changes in anything we're watching */
-		nih_io_select_fds (&nfds, &readfds, &writefds, &exceptfds);
+		nih_io_setup_epoll_fds (epfd);
 
 		/* Now we hang around until either a signal comes in (and
 		 * calls nih_main_loop_interrupt), a file descriptor we're
 		 * watching changes in some way or it's time to run a timer.
 		 */
-		ret = select (nfds, &readfds, &writefds, &exceptfds,
-			      (next_timer ? &timeout : NULL));
+		nfds = epoll_wait(epfd, evs, 1024, timeout_ms);
 
 		/* Deal with events */
-		if (ret > 0)
-			nih_io_handle_fds (&readfds, &writefds, &exceptfds);
+		if (nfds > 0)
+			nih_io_handle_epoll_fds (nfds, evs);
 
 		/* Deal with signals.
 		 *
@@ -608,6 +610,7 @@ nih_main_loop (void)
 
 			func->callback (func->data, func);
 		}
+		close(epfd);
 	}
 
 	exit_loop = 0;

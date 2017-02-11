@@ -22,9 +22,19 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 
 #include <nih/macros.h>
 #include <nih/list.h>
+
+/* from kernel select implementation
+#define POLLIN_SET (POLLRDNORM | POLLRDBAND | POLLIN | POLLHUP | POLLERR)
+#define POLLOUT_SET (POLLWRBAND | POLLWRNORM | POLLOUT | POLLERR)
+#define POLLEX_SET (POLLPRI)
+ */
+#define POLLIN_SET ( EPOLLIN | EPOLLHUP | EPOLLRDHUP )
+#define POLLOUT_SET ( EPOLLOUT )
+#define POLLEX_SET ( EPOLLPRI )
 
 
 /**
@@ -271,8 +281,22 @@ NihIoWatch *  nih_io_add_watch           (const void *parent, int fd,
 					  NihIoWatcher watcher, void *data)
 	__attribute__ ((warn_unused_result, malloc));
 
+/*
+ * nih_io_setup_epoll_fds fills an epoll_event array with data reflecting the
+ * activity requested in nih watches.
+ *
+ * nih_io_select_fds fills select fd_sets with data reflecting the activity
+ * requested in nih watches.
+ *
+ * nih_io_handle_epoll_fds and nih_io_handle_fds take epoll and select
+ * fd_set structures, respectively, resulting from an epoll or select call,
+ * and run the nih watch triggers for the fds for which activity was found.
+ */
+void          nih_io_setup_epoll_fds     (int epfd);
+struct epoll_event;
 void          nih_io_select_fds          (int *nfds, fd_set *readfds,
 					  fd_set *writefds, fd_set *exceptfds);
+void          nih_io_handle_epoll_fds    (int nfds, struct epoll_event *ev);
 void          nih_io_handle_fds          (fd_set *readfds, fd_set *writewfds,
 					  fd_set *exceptfds);
 
